@@ -3,9 +3,15 @@
  * Satellite Data Processing + Time Series
  ********************************************/
 
-// IMPORTANT: Ensure that 'damPolygon' is defined globally before running the code.
+// IMPORTANT: Ensure that 'ROIPolygon' is defined globally before running the code.
 // Example:
 // var damPolygon = ee.Geometry.Polygon([...]);
+
+var currentLayer = null;
+var currentLegend = null;
+var currentVisParams = null;
+var currentBand = null;
+var currentMonth = null;
 
 /**
  * Applies scale factors to Landsat 8 and 9 images for optical and thermal bands.
@@ -502,6 +508,29 @@ var bandSelect = ui.Select({
 });
 displayPanel.add(bandSelect);
 
+displayPanel.add(ui.Label('Visualization Parameters (optional):', HELPER_TEXT_STYLE));
+
+displayPanel.add(ui.Label('Min:', HELPER_TEXT_STYLE));
+var minInput = ui.Textbox({
+  placeholder: 'Enter min value',
+  style: {width: '100%'}
+});
+displayPanel.add(minInput);
+
+displayPanel.add(ui.Label('Max:', HELPER_TEXT_STYLE));
+var maxInput = ui.Textbox({
+  placeholder: 'Enter max value',
+  style: {width: '100%'}
+});
+displayPanel.add(maxInput);
+
+displayPanel.add(ui.Label('Palette (comma-separated colors):', HELPER_TEXT_STYLE));
+var paletteInput = ui.Textbox({
+  placeholder: 'e.g., blue,green,red',
+  style: {width: '100%'}
+});
+displayPanel.add(paletteInput);
+
 /**
  * Returns visualization parameters (stretch + palette) for each band, including raw bands.
  */
@@ -568,6 +597,76 @@ function getVisParams(band) {
   }
 }
 
+/**
+ * Adds a color bar legend to the map for the given band and visualization parameters.
+ * @param {string} band - The band name.
+ * @param {Object} visParams - The visualization parameters including min, max, and palette.
+ */
+function addLegend(band, visParams) {
+  if (currentLegend) {
+    Map.remove(currentLegend);
+  }
+
+  var legend = ui.Panel({
+    style: {
+      position: 'bottom-left',
+      padding: '8px 15px',
+      backgroundColor: 'white'
+    }
+  });
+
+  var title = ui.Label({
+    value: band,
+    style: {
+      fontWeight: 'bold',
+      fontSize: '18px',
+      margin: '0 0 4px 0',
+      padding: '0'
+    }
+  });
+  legend.add(title);
+
+  var minVal = visParams.min;
+  var maxVal = visParams.max;
+  var palette = visParams.palette;
+
+  var gradient = ee.Image.pixelLonLat().select('longitude')
+    .add(180).divide(360)
+    .multiply(maxVal - minVal).add(minVal);
+
+  var colorBar = ui.Thumbnail(gradient, {
+    min: minVal,
+    max: maxVal,
+    palette: palette,
+    dimensions: '200x10',
+    format: 'png'
+  });
+  legend.add(colorBar);
+
+  var labelsPanel = ui.Panel({
+    widgets: [
+      ui.Label(minVal, {margin: '4px 8px'}),
+      ui.Label(((minVal + maxVal) / 2), {margin: '4px 8px', textAlign: 'center', stretch: 'horizontal'}),
+      ui.Label(maxVal, {margin: '4px 8px'})
+    ],
+    layout: ui.Panel.Layout.flow('horizontal'),
+    style: {stretch: 'horizontal'}
+  });
+  legend.add(labelsPanel);
+
+  Map.add(legend);
+  currentLegend = legend;
+}
+
+bandSelect.onChange(function(band) {
+  if (band) {
+    var defVis = getVisParams(band);
+    minInput.setValue(defVis.min.toString());
+    maxInput.setValue(defVis.max.toString());
+    paletteInput.setValue(defVis.palette.join(','));
+  }
+});
+
 // Button to display a single month/band
 var displayButton = ui.Button({
   label: 'Display on Map',
@@ -579,11 +678,56 @@ var displayButton = ui.Button({
       return;
     }
     var clippedData = processMonth(month);
+    var minVal = minInput.getValue();
+    var newMin = minVal ? parseFloat(minVal) : undefined;
+    var maxVal = maxInput.getValue();
+    var newMax = maxVal ? parseFloat(maxVal) : undefined;
+    var paletteVal = paletteInput.getValue();
+    var newPalette = paletteVal ? paletteVal.split(',').map(function(s) { return s.trim(); }) : undefined;
     var visParams = getVisParams(band);
-    Map.addLayer(clippedData.select(band), visParams, 'Data ' + month + ' - ' + band);
+    if (newMin !== undefined) visParams.min = newMin;
+    if (newMax !== undefined) visParams.max = newMax;
+    if (newPalette !== undefined) visParams.palette = newPalette;
+    currentVisParams = visParams;
+    currentBand = band;
+    currentMonth = month;
+    if (currentLayer) Map.remove(currentLayer);
+    if (currentLegend) Map.remove(currentLegend);
+    var layer = ui.Map.Layer(clippedData.select(band), currentVisParams, 'Data ' + month + ' - ' + band);
+    Map.add(layer);
+    currentLayer = layer;
+    addLegend(band, currentVisParams);
+    minInput.setValue(currentVisParams.min.toString());
+    maxInput.setValue(currentVisParams.max.toString());
+    paletteInput.setValue(currentVisParams.palette.join(','));
   },
   style: BUTTON_STYLE,
 });
+displayPanel.add(displayButton);
+
+var updateVisButton = ui.Button({
+  label: 'Update Visualization',
+  onClick: function () {
+    if (!currentLayer || !currentBand) {
+      print('No layer displayed yet.');
+      return;
+    }
+    var minVal = minInput.getValue();
+    var newMin = minVal ? parseFloat(minVal) : currentVisParams.min;
+    var maxVal = maxInput.getValue();
+    var newMax = maxVal ? parseFloat(maxVal) : currentVisParams.max;
+    var paletteVal = paletteInput.getValue();
+    var newPalette = paletteVal ? paletteVal.split(',').map(function(s) { return s.trim(); }) : currentVisParams.palette;
+    currentVisParams = {min: newMin, max: newMax, palette: newPalette};
+    currentLayer.setVisParams(currentVisParams);
+    if (currentLegend) {
+      Map.remove(currentLegend);
+    }
+    addLegend(currentBand, currentVisParams);
+  },
+  style: BUTTON_STYLE,
+});
+displayPanel.add(updateVisButton);
 
 // Button to export data for all months in the selected range
 var exportButton = ui.Button({
@@ -647,7 +791,6 @@ mainPanel.add(
 mainPanel.add(datePanel);
 mainPanel.add(exportBandsPanel);
 mainPanel.add(displayPanel);
-mainPanel.add(displayButton);
 mainPanel.add(exportButton);
 
 // ---- Time Series Panel (New Section) ---- //
